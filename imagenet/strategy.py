@@ -15,6 +15,8 @@ class BaseStrategy(object):
             return tf.train.GradientDescentOptimizer(learning_rate)
         elif (self._optimizer == 'momentum'):
             return tf.train.MomentumOptimizer(learning_rate, 0.9)
+        elif (self._optimizer == 'rmsprop'):
+            return tf.train.RMSPropOptimizer(learning_rate, 0.9)
         else:
             tf.logging.error("Optimizer not found.")
             exit(-1)
