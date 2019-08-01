@@ -17,7 +17,7 @@ import process_imagenet_data.record_data_read as rdread
 # os.system('GREPDB="read"; /bin/bash -c "$GREPDB"')
 
 # ----- CPU / GPU Set
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 CONFIG = tf.ConfigProto()
 #CONFIG.gpu_options.allow_growth=True
 #CONFIG.log_device_placement=True
@@ -28,7 +28,7 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_integer('batch_size', 64, """Batch size.""")
 tf.app.flags.DEFINE_integer('num_epochs', 60, """""")
 tf.app.flags.DEFINE_integer('num_batches', 100, """Number of batches to run.""")
-tf.app.flags.DEFINE_integer('num_gpus', 2, """""")
+tf.app.flags.DEFINE_integer('num_gpus', 4, """""")
 tf.app.flags.DEFINE_string('model', 'resnet50', """""")
 tf.app.flags.DEFINE_string('optimizer', 'sgd',
                             """ - sgd
@@ -126,7 +126,7 @@ class DistributedEndHook(tf.train.SessionRunHook):
             i = i+1
             print('Worker %i Closed' % i)
 
-DATA_DIR = "process_imagenet_data/record_data/"
+DATA_DIR = "/data/record_data"
 class ImageNet_Data(object):
     def __init__(self, name, subset):
         assert subset in self.available_subsets()
@@ -224,7 +224,7 @@ class BenchMark(object):
             with tf.name_scope('xentropy'):
                 cross_entropy = tf.losses.sparse_softmax_cross_entropy(logits=last_layer, labels=labels)
                 loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
-            with tf.device(self.cpu_device):
+            with tf.device(self.cpu_device[0]):
                 top_1_op = tf.reduce_sum(
                     tf.cast(tf.nn.in_top_k(last_layer, labels, 1), tf.float32))
                 top_5_op = tf.reduce_sum(
@@ -316,7 +316,10 @@ class BenchMark(object):
                 for gpu_index, gpu in enumerate(gpu_in_worker):
                     with tf.device(gpu), tf.variable_scope('Tower_%i_%i' % (worker_index, gpu_index), custom_getter=strategy):
                         features, labels = input_data_iterator.get_next()
-                        loss, batch_accuracy = self._model_fn(features, labels)
+                        loss, top_1,top_5 = self._model_fn(features, labels)
+                        loss_list.append(loss)
+                        top_1_list.append(top_1)
+                        top_5_list.append(top_5)
                         local_varis = strategy.get_local_variable(worker_index, gpu_index)
                         gradients = tf.gradients(loss, local_varis, aggregation_method=tf.AggregationMethod.DEFAULT)
                         gradients_list.append(gradients)
@@ -410,7 +413,7 @@ class BenchMark(object):
         if FLAGS.work_mode == 'test':
             checkpoint_dir = None
         elif FLAGS.work_mode == 'train':
-            checkpoint_dir = 'train'
+            checkpoint_dir = None
         with tf.train.MonitoredTrainingSession(target,
             is_chief=is_chief, summary_dir='train', checkpoint_dir=checkpoint_dir, config=CONFIG,
             hooks=hooks, chief_only_hooks=chief_only_hooks) as sess:

@@ -58,12 +58,22 @@ class LocalPSStrategy(BaseStrategy):
         if self._use_staging:
             shape = kwargs['shape']
             dtype = kwargs['dtype']
+            # with tf.name_scope("Benchmark_Net/Input_Staging/Staging"):
+            #     staging_var = data_flow_ops.StagingArea([dtype], [shape])
+            #     put_op = staging_var.put(tf.identity(global_var))
+            #     get_op = staging_var.get()[0]
+            #     self._staging_put_ops.append(put_op)
+            #     self._local_variable[device_index][name_without_tower] = get_op
             with tf.name_scope("Benchmark_Net/Input_Staging/Staging"):
                 staging_var = data_flow_ops.StagingArea([dtype], [shape])
-                put_op = staging_var.put(tf.identity(global_var))
-                get_op = staging_var.get()[0]
-                self._staging_put_ops.append(put_op)
-                self._local_variable[device_index][name_without_tower] = get_op
+                # Tensor object has no attribute 'assign_sub'
+                if ('moving' in name_without_tower):
+                    self._local_variable[device_index][name_without_tower] = global_var
+                else:
+                    put_op = staging_var.put(tf.identity(global_var))
+                    get_op = staging_var.get()[0]
+                    self._staging_put_ops.append(put_op)
+                    self._local_variable[device_index][name_without_tower] = get_op
         else:
             self._local_variable[device_index][name_without_tower] = global_var
 
@@ -84,13 +94,33 @@ class LocalPSStrategy(BaseStrategy):
             gradients_get_op = [
                 list() for _ in self._gpu_devices
             ]
+            # for index, gradients in enumerate(gradients_list):
+            #     with tf.device(self._gpu_devices[index]), tf.name_scope("Gradient_Staging/Staging"):
+            #         dtypes = [g.dtype for g in gradients]
+            #         shapes = [g.shape for g in gradients]
+            #         staging_var = data_flow_ops.StagingArea(dtypes, shapes)
+            #         gradients_put_op.append(staging_var.put(gradients))
+            #         gradients_get_op[index] = staging_var.get()
+            # gradients_list = gradients_get_op
             for index, gradients in enumerate(gradients_list):
                 with tf.device(self._gpu_devices[index]), tf.name_scope("Gradient_Staging/Staging"):
-                    dtypes = [g.dtype for g in gradients]
-                    shapes = [g.shape for g in gradients]
-                    staging_var = data_flow_ops.StagingArea(dtypes, shapes)
-                    gradients_put_op.append(staging_var.put(gradients))
-                    gradients_get_op[index] = staging_var.get()
+                    gradients_not_none = []
+                    for grad in gradients:
+                        if(grad is not None):
+                            gradients_not_none.append(grad)
+                        else:
+                            gradients_not_none.append(tf.constant(0))
+                    # moving_mean and moving_variance have no gradients
+                    dtypes = [g.dtype for g in gradients_not_none if g is not None]
+                    shapes = [g.shape for g in gradients_not_none if g is not None]
+                    gradients = [grad for grad in gradients_not_none if grad is not None]
+                    grad_list = []
+                    for idx, grad in enumerate(gradients):
+                        staging_var = data_flow_ops.StagingArea([dtypes[idx]], [shapes[idx]])
+                        gradients_put_op.append(staging_var.put(gradients[idx]))
+                        grad_list.append(staging_var.get()[0])
+                    gradients_get_op[index] = grad_list
+            gradients_put_op = tf.group(gradients_put_op)
             gradients_list = gradients_get_op
 
         with tf.name_scope('Gradient_Update'):
@@ -101,7 +131,7 @@ class LocalPSStrategy(BaseStrategy):
                     grads = g_v[:self._num_gpus]
                     varis = g_v[self._num_gpus]
                     # Some variable in BatchNorm do not have gradient
-                    if grads[0] != None:
+                    if 'moving' not in varis.name:
                         with tf.device(varis.device):
                             average_grad = tf.multiply(tf.add_n(grads), 1.0 / self._num_gpus)
                             apply = optimizer.apply_gradients([(average_grad, varis)])
@@ -171,10 +201,11 @@ class LocalAllreduceStrategy(BaseStrategy):
                     grads = g_v[:self._num_gpus]
                     varis = g_v[self._num_gpus:]
                     for (grad, vari) in zip(grads, varis):
-                        with tf.device(vari.device):
-                            local_average_grad = collective_ops.all_reduce(grad, self._num_gpus, 1, instance_key, 'Add', 'Div')
-                            apply = optimizer.apply_gradients([(local_average_grad, vari)])
-                            apply_list.append(apply)
+                        if grads[0] != None:
+                            with tf.device(vari.device):# test
+                                local_average_grad = collective_ops.all_reduce(grad, self._num_gpus, 1, instance_key, 'Add', 'Div')
+                                apply = optimizer.apply_gradients([(local_average_grad, vari)])
+                                apply_list.append(apply)
                 with tf.device(global_step.device):
                     apply_list.append(global_step.assign_add(1))
                 apply_op = tf.group(apply_list)
@@ -271,14 +302,15 @@ class DistributedPSStrategy(BaseStrategy):
                 grad_sum_list = []
                 for i in range(self._num_workers):
                     grads_in_worker = grads[i*self._num_gpus:(i+1)*self._num_gpus]
-                    with tf.device(self._cpu_device[i]):
-                        grad_sum_in_worker = tf.add_n(grads_in_worker)
-                        grad_sum_list.append(grad_sum_in_worker)
-
-                with tf.device(varis.device):
-                    average_grad = tf.multiply(tf.add_n(grad_sum_list), 1.0 / self._total_gpus)
-                    apply = optimizer.apply_gradients([(average_grad, varis)])
-                    apply_list.append(apply)
+                    if grads_in_worker[0] != None:
+                        with tf.device(self._cpu_device[i]):
+                            grad_sum_in_worker = tf.add_n(grads_in_worker)
+                            grad_sum_list.append(grad_sum_in_worker)
+                if len(grad_sum_list) > 0:
+                    with tf.device(varis.device):
+                        average_grad = tf.multiply(tf.add_n(grad_sum_list), 1.0 / self._total_gpus)
+                        apply = optimizer.apply_gradients([(average_grad, varis)])
+                        apply_list.append(apply)
 
             with tf.device(global_step.device):
                 apply_list.append(global_step.assign_add(1))
@@ -356,9 +388,10 @@ class DistributedAllreduceStrategy(BaseStrategy):
                 for i in range(self._num_workers):
                     grads = g_v[i*self._num_gpus:(i+1)*self._num_gpus]
                     varis = g_v[self._total_gpus+i*self._num_gpus:self._total_gpus+(i+1)*self._num_gpus]
-                    with tf.device(self._cpu_device[i]):
-                        grads_sum = tf.add_n(grads)
-                        local_average_grad = collective_ops.all_reduce(grads_sum, self._num_workers, 1, instance_key, 'Add', 'Id')
+                    if grads[0] != None:
+                        with tf.device(self._cpu_device[i]):
+                            grads_sum = tf.add_n(grads)
+                            local_average_grad = collective_ops.all_reduce(grads_sum, self._num_workers, 1, instance_key, 'Add', 'Id')
                     for vari in varis:
                         with tf.device(vari.device):
                             grad = tf.multiply(local_average_grad, 1.0 / self._num_gpus)
