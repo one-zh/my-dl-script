@@ -438,7 +438,7 @@ class BenchMark(object):
         values = [1, 0.1, 0.01, 0.001, 0.0001]
         values = [rescaled_lr * v for v in values]
         lr = tf.train.piecewise_constant(global_step, boundaries, values)
-        warmup_steps = int(num_batches_per_epoch * 1)
+        warmup_steps = int(num_batches_per_epoch * 3)
         warmup_lr = (
             rescaled_lr * tf.cast(global_step, tf.float32) / tf.cast(
                 warmup_steps, tf.float32))
