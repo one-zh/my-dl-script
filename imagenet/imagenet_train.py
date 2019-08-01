@@ -430,12 +430,15 @@ class BenchMark(object):
 
     def get_learning_rate(self, global_step):
         rescaled_lr = FLAGS.learning_rate
-        num_batches_per_epoch = (1281167 / self._batch_size)
+        __batch_size = self._batch_size * self._num_gpus
+        if self._worker_prefix:
+            __batch_size = __batch_size * self._num_workers
+        num_batches_per_epoch = (1281167 / __batch_size)
         boundaries = [int(num_batches_per_epoch * x) for x in [30, 60, 80, 90]]
         values = [1, 0.1, 0.01, 0.001, 0.0001]
         values = [rescaled_lr * v for v in values]
         lr = tf.train.piecewise_constant(global_step, boundaries, values)
-        warmup_steps = int(num_batches_per_epoch * 5)
+        warmup_steps = int(num_batches_per_epoch * 1)
         warmup_lr = (
             rescaled_lr * tf.cast(global_step, tf.float32) / tf.cast(
                 warmup_steps, tf.float32))
